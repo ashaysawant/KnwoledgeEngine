@@ -1,14 +1,16 @@
 from atlassian import Confluence
-import json
 import weaviate
 from weaviate.classes.config import Configure
 from weaviate.config import AdditionalConfig,ConnectionConfig
-import requests, json
+import os
+import glob
+import docx2txt
+from pypdf import PdfReader
 
 confluence = Confluence(
-    url='',
-    username='',
-    password='')
+    url=os.environ['confluenceURL'],
+    username=os.environ['confluenceUserID'],
+    password=os.environ['confluencePass'] )
 
 client = weaviate.connect_to_local(skip_init_checks=True,additional_config=AdditionalConfig(
                 connection=ConnectionConfig(
@@ -25,29 +27,62 @@ def get_all_pages(confluence, space):
     _all_pages = []
     while True:
         pages = confluence.get_all_pages_from_space(space, start, limit, status=None, expand=None, content_type='page')
-        
-        # print(confluence.get_page_by_id(pages.id, expand=None, status=None, version=None))
-
         _all_pages = _all_pages + pages
         if len(pages) < limit:
             break
         start = start + limit
     return _all_pages
 
+def load_attachments(cf_dict):
+    for word_file in glob.glob("./Data/*.docx"):
+        text = docx2txt.process(word_file)
+        cf_page = dict()
+        cf_page['title'] = os.path.basename(word_file) 
+        cf_page['content'] = text
+        cf_dict.append(cf_page)
+    for pdf_file in glob.glob("./Data/*.pdf"):
+        reader = PdfReader(pdf_file)
+        l = []
+        for page in reader.pages:
+            # extracting text from page
+            l.append(page.extract_text())
+        cf_page = dict()
+        cf_page['title'] = os.path.basename(pdf_file) 
+        cf_page['content'] = ''.join(l)
+        cf_dict.append(cf_page)
+    return cf_dict
+
+def download_attachments(confluence,pageId):
+    attachments_container = confluence.get_attachments_from_content(page_id=pageId, start=0, limit=500)
+    # print(attachments_container)
+    attachments = attachments_container['results']
+    if attachments:
+        resp = confluence.download_attachments_from_page(pageId, path='./Data')
+        if resp['attachments downloaded'] > 0:
+            return True
+    return False
+
+def delete_attachments():
+    for myfile in glob.glob("./Data/*"):
+        # If file exists, delete it.
+        if os.path.isfile(myfile):
+            os.remove(myfile)
+
+
 def get_all_pages_data(confluence,space,all_pages):
     cf_dict = []
+    attachments_present = False
     for page in all_pages:
-        # print(page_json)
-        # page = json.loads(page_json)
-        # print(page.id)
-
         cf_page = dict()
         cf_page['title'] = page['title']
         content = confluence.get_page_by_id(page_id=page['id'], expand="body.view", status=None, version=None)
         cf_page['content'] = content['body']['view']['value']
         cf_dict.append(cf_page)
-        # content = confluence.get_page_by_title(space=space, title=page['title'])
-        # print(json.dumps(page))
+        if (download_attachments(confluence=confluence,pageId=page['id'])):
+            attachments_present = True
+    if attachments_present:
+        cf_dict = load_attachments(cf_dict)
+        delete_attachments()
     return cf_dict
 
 def create_collection(name):
@@ -65,10 +100,6 @@ def create_collection(name):
 
 #### Insert objects
 def insert_objects(data,collection):
-    # resp = requests.get(
-    #     "https://raw.githubusercontent.com/weaviate-tutorials/quickstart/main/data/jeopardy_tiny.json"
-    # )
-    # data = json.loads(resp.text)
 
     questions = client.collections.get(collection)
 
@@ -89,6 +120,7 @@ def delete_collection():
 all_pages = get_all_pages(confluence=confluence,space='CHASE')
 if all_pages:
     cf_dict = get_all_pages_data(confluence=confluence,space='CHASE',all_pages=all_pages)
+    print(cf_dict)
     if cf_dict and client.is_ready():
         if client.collections.exists('CHASE'):
             print('collection found')
